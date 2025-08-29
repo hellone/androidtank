@@ -9,10 +9,11 @@ import kotlinx.coroutines.tasks.await
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+// ⚠️ x,y sont NORMALISÉS (0..1) côté réseau
 data class NetPlayerState(
     val name: String = "",
-    val x: Float = 0f,
-    val y: Float = 0f,
+    val x: Float = 0f,   // 0..1
+    val y: Float = 0f,   // 0..1
     val angle: Float = 0f,
     val ts: Long = 0L
 )
@@ -39,19 +40,13 @@ class Online(
         if (auth.currentUser == null) auth.signInAnonymously().await()
         myId = auth.currentUser!!.uid
 
-        // Petit ménage: supprime joueurs inactifs
         cleanupStalePlayers(staleMs = 10_000)
-
-        // Réserve un slot p1/p2 (transaction atomique)
         mySlot = claimSlotOrThrow()
 
         meRef = roomRef.child("players").child(myId)
-
-        // Nettoyage auto à la déconnexion
         meRef.onDisconnect().removeValue()
         mySlot?.let { slotsRef.child(it).onDisconnect().setValue(null) }
 
-        // Etat initial
         meRef.setValue(NetPlayerState(name = name, ts = System.currentTimeMillis()))
         return myId
     }
@@ -59,11 +54,14 @@ class Online(
     fun playersRef(): DatabaseReference = roomRef.child("players")
     fun slotsLiveRef(): DatabaseReference = slotsRef
 
-    fun updateMyState(x: Float, y: Float, angle: Float) {
+    // Envoi d'état : xNorm,yNorm ∈ [0..1]
+    fun updateMyState(xNorm: Float, yNorm: Float, angle: Float) {
+        val xn = xNorm.coerceIn(0f, 1f)
+        val yn = yNorm.coerceIn(0f, 1f)
         meRef.updateChildren(
             mapOf(
-                "x" to x,
-                "y" to y,
+                "x" to xn,
+                "y" to yn,
                 "angle" to angle,
                 "ts" to ServerValue.TIMESTAMP
             )
@@ -79,13 +77,6 @@ class Online(
 
     // -------------------- Helpers --------------------
 
-    /**
-     * Transaction atomique sur /slots :
-     * - si p1 vide -> je prends p1
-     * - sinon si p2 vide -> je prends p2
-     * - sinon -> ROOM_FULL
-     * Utilise les CHILDREN au lieu de caster une Map -> évite l'erreur "out projection".
-     */
     private suspend fun claimSlotOrThrow(): String =
         suspendCancellableCoroutine { cont ->
             slotsRef.runTransaction(object : Transaction.Handler {
@@ -93,10 +84,7 @@ class Online(
                     val p1 = currentData.child("p1").getValue(String::class.java)
                     val p2 = currentData.child("p2").getValue(String::class.java)
 
-                    // Reconnexion: je possède déjà un slot
-                    if (p1 == myId || p2 == myId) {
-                        return Transaction.success(currentData)
-                    }
+                    if (p1 == myId || p2 == myId) return Transaction.success(currentData)
 
                     return when {
                         p1.isNullOrEmpty() -> {
@@ -145,7 +133,6 @@ class Online(
             val st = child.getValue(NetPlayerState::class.java) ?: continue
             val uid = child.key ?: continue
             if (now - st.ts > staleMs) {
-                // retire joueur inactif et libère son slot
                 roomRef.child("players").child(uid).removeValue()
                 val slots = slotsRef.get().await()
                 val p1 = slots.child("p1").getValue(String::class.java)
