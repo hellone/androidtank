@@ -46,16 +46,21 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun GameScreen() {
-    // Taille du monde (= taille du canvas)
+    // Monde (taille du canvas)
     var worldW by remember { mutableFloatStateOf(0f) }
     var worldH by remember { mutableFloatStateOf(0f) }
 
-    // Tank state
+    // Mon tank
     var tankX by remember { mutableFloatStateOf(0f) }
     var tankY by remember { mutableFloatStateOf(0f) }
     var tankAngle by remember { mutableFloatStateOf(0f) }
 
-    // Sortie joystick (normalisée [-1,1])
+    // Autres joueurs (affichage lissé)
+    data class Smooth(val x: MutableState<Float>, val y: MutableState<Float>, val angle: MutableState<Float>)
+    val others = remember { mutableMapOf<String, Smooth>() }
+    var myId by remember { mutableStateOf("") }
+
+    // Joystick
     var joyDx by remember { mutableFloatStateOf(0f) }
     var joyDy by remember { mutableFloatStateOf(0f) }
 
@@ -63,33 +68,73 @@ fun GameScreen() {
     val spriteSize = 160
     val half = spriteSize / 2f
 
-    // Images
-    val background: ImageBitmap = ImageBitmap.imageResource(id = R.drawable.battlefield)
-    val tankSprite: ImageBitmap = ImageBitmap.imageResource(id = R.drawable.tank)
+    val background = ImageBitmap.imageResource(R.drawable.battlefield)
+    val tankSprite = ImageBitmap.imageResource(R.drawable.tank)
 
-    // Boucle d’update – démarre quand on connaît la taille du monde
-    LaunchedEffect(worldW, worldH) {
-        if (worldW <= 0f || worldH <= 0f) return@LaunchedEffect
-        // init position au centre si 0
-        if (tankX == 0f && tankY == 0f) {
-            tankX = worldW / 2f
-            tankY = worldH / 2f
-        }
+    // --- Online Firebase (room-1) ---
+    val online = remember {
+        Online(
+            roomId = "room-1",
+            databaseUrl = "https://tank-74afa-default-rtdb.europe-west1.firebasedatabase.app/"
+        )
+    }
+
+    // Connexion + listener
+    LaunchedEffect(Unit) {
+        myId = online.connect(name = "Player")
+        online.playersRef().addValueEventListener(object : com.google.firebase.database.ValueEventListener {
+            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                val seen = mutableSetOf<String>()
+                for (child in snapshot.children) {
+                    val id = child.key ?: continue
+                    val st = child.getValue(NetPlayerState::class.java) ?: continue
+                    seen.add(id)
+                    if (id == myId) continue
+                    val smooth = others.getOrPut(id) {
+                        Smooth(mutableStateOf(st.x), mutableStateOf(st.y), mutableStateOf(st.angle))
+                    }
+                    smooth.x.value = st.x
+                    smooth.y.value = st.y
+                    smooth.angle.value = st.angle
+                }
+                // retire ceux qui ont quitté
+                others.keys.filter { it !in seen }.forEach { others.remove(it) }
+            }
+            override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
+        })
+    }
+
+    // Boucle frame : mouvement local + envoi réseau + lissage
+    LaunchedEffect(worldW, worldH, myId) {
+        if (worldW <= 0f || worldH <= 0f || myId.isEmpty()) return@LaunchedEffect
+        if (tankX == 0f && tankY == 0f) { tankX = worldW/2f; tankY = worldH/2f }
+
         var last = withFrameNanos { it }
+        var lastSend = 0L
+
         while (true) {
             val now = withFrameNanos { it }
-            val dt = ((now - last) / 1_000_000_000.0).toFloat()
+            val dt = ((now - last) / 1_000_000_000.0f)
             last = now
 
             tankX = (tankX + joyDx * tankSpeed * dt).coerceIn(half, worldW - half)
             tankY = (tankY + joyDy * tankSpeed * dt).coerceIn(half, worldH - half)
-
             if (joyDx != 0f || joyDy != 0f) {
                 tankAngle = Math.toDegrees(atan2(joyDy.toDouble(), joyDx.toDouble())).toFloat()
+            }
+
+            // Envoi réseau throttlé (~15 Hz)
+            val ms = System.currentTimeMillis()
+            if (ms - lastSend > 66 && myId.isNotEmpty()) {
+                online.updateMyState(tankX, tankY, tankAngle)
+                lastSend = ms
             }
         }
     }
 
+    DisposableEffect(Unit) { onDispose { online.disconnect() } }
+
+    // --- Dessin ---
     Box(Modifier.fillMaxSize()) {
         Canvas(
             modifier = Modifier
@@ -99,13 +144,27 @@ fun GameScreen() {
                     worldH = sz.height.toFloat()
                 }
         ) {
-            // Fond plein écran
+            // Fond
             drawImage(
                 image = background,
                 dstSize = IntSize(size.width.toInt(), size.height.toInt())
             )
 
-            // Tank pivoté autour de son centre
+            // Autres joueurs (déjà lissés par MAJ progressive des states)
+            others.forEach { (_, s) ->
+                withTransform({
+                    translate(s.x.value, s.y.value)
+                    rotate(degrees = s.angle.value, pivot = Offset.Zero)
+                }) {
+                    drawImage(
+                        image = tankSprite,
+                        dstSize = IntSize(spriteSize, spriteSize),
+                        dstOffset = IntOffset(-spriteSize/2, -spriteSize/2)
+                    )
+                }
+            }
+
+            // Mon tank
             withTransform({
                 translate(tankX, tankY)
                 rotate(degrees = tankAngle, pivot = Offset.Zero)
@@ -113,12 +172,12 @@ fun GameScreen() {
                 drawImage(
                     image = tankSprite,
                     dstSize = IntSize(spriteSize, spriteSize),
-                    dstOffset = IntOffset(-spriteSize / 2, -spriteSize / 2)
+                    dstOffset = IntOffset(-spriteSize/2, -spriteSize/2)
                 )
             }
         }
 
-        // Joystick bas-gauche
+        // Joystick
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -127,24 +186,18 @@ fun GameScreen() {
             Joystick(
                 diameter = 160.dp,
                 knobRadius = 28.dp,
-                onVectorChange = { dx, dy ->
-                    joyDx = dx
-                    joyDy = dy
-                }
+                onVectorChange = { dx, dy -> joyDx = dx; joyDy = dy }
             )
         }
 
-        // HUD debug
         Text(
-            text = "dx=%.2f dy=%.2f angle=%.0f".format(joyDx, joyDy, tankAngle),
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(8.dp),
-            color = Color.White,
-            fontSize = 14.sp
+            text = "online: room-1",
+            modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+            color = Color.White, fontSize = 14.sp
         )
     }
 }
+
 
 @Composable
 fun Joystick(

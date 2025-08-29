@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "444936343582",
+    "project_id": "tank-74afa",
+    "storage_bucket": "tank-74afa.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:444936343582:android:1b3aeafc0e8a49e98bde0f",
+        "android_client_info": {
+          "package_name": "com.manaa.tankwar"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCl7IMnsYQZdLRmcHLxlfIouvL66BwBVVc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
